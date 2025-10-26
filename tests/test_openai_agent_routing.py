@@ -167,3 +167,21 @@ def test_normalize_observation_colonel_override():
     normalized = agent._normalize_observation(colonel_obs)
     assert "Format: '[A7 B7 C6]'" in normalized
     assert "A4 B2 C2" not in normalized
+
+
+def test_colonel_numeric_format_replacement():
+    agent = OpenAIAgent.__new__(OpenAIAgent)
+    numeric_obs = "Format: '[4,2,2]' some other instructions"
+    normalized = agent._normalize_observation(numeric_obs)
+    assert "[7,7,6]" in normalized
+    assert "[4,2,2]" not in normalized
+
+    def _loader(game: str, variant: Optional[str]) -> Optional[str]:
+        return "Format: '[4, 2, 2]' rules"
+
+    agent._prompt_loader = _loader
+    agent._static_system_prompt = None
+    agent._fallback_system_prompt = "fallback"
+    prompt = agent._resolve_system_prompt("[GAME] Colonel Blotto ...")
+    assert "[7, 7, 6]" in prompt
+    assert "[4, 2, 2]" not in prompt

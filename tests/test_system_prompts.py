@@ -15,12 +15,10 @@ def test_get_game_prompt_keys():
     assert get_game_prompt("codenames")
 
 
-def test_strong_variant_provides_augmented_prompt():
-    prompt = get_game_prompt("colonel_blotto", variant="strong")
-    assert prompt is not None
-    assert "<think>" in prompt or "<think></think>" in prompt
-    assert "Colonel Blotto" in prompt
-    assert "Opponent Analysis" in prompt or "Data Extraction" in prompt
+def test_variant_argument_returns_default_prompt():
+    default_prompt = get_game_prompt("colonel_blotto")
+    variant_prompt = get_game_prompt("colonel_blotto", variant="strong")
+    assert variant_prompt == default_prompt
 
 
 def test_detect_game_from_observation_samples():

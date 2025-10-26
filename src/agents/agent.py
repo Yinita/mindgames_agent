@@ -94,7 +94,7 @@ class OpenAIAgent(Agent):
             base_url: Optional custom endpoint (falls back to OPENAI_BASE_URL env).
             system_prompt: Prompt injected as the system message when routing is disabled.
             request_timeout: Optional override for HTTP timeout.
-            prompt_variant: Optional variant name (e.g., "strong") passed to the prompt loader.
+            prompt_variant: Optional hint passed to the prompt loader (reserved for future use).
             prompt_loader: Custom loader to resolve prompts; defaults to `get_game_prompt`.
                 When the loader is available and ``system_prompt`` is not provided, the
                 agent will attempt to infer the game from each observation and fetch the
@@ -170,7 +170,15 @@ class OpenAIAgent(Agent):
                 prompt = self._prompt_loader(game, self.prompt_variant)
                 if prompt:
                     if game == "colonel_blotto":
-                        prompt = prompt.replace("Format: '[A4 B2 C2]'", "Format: '[A7 B7 C6]'")
+                        replacements = {
+                            "Format: '[A4 B2 C2]'": "Format: '[A7 B7 C6]'",
+                            "Format: '[4,2,2]'": "Format: '[7,7,6]'",
+                            "Format: '[4, 2, 2]'": "Format: '[7, 7, 6]'",
+                            "Format: '[4 2 2]'": "Format: '[7 7 6]'",
+                        }
+                        for old, new in replacements.items():
+                            if old in prompt:
+                                prompt = prompt.replace(old, new)
                     return prompt
 
         return self._fallback_system_prompt
@@ -180,7 +188,17 @@ class OpenAIAgent(Agent):
             return observation
         game = _detect_game_from_observation(observation)
         if game == "colonel_blotto":
-            return observation.replace("Format: '[A4 B2 C2]'", "Format: '[A7 B7 C6]'")
+            replacements = {
+                "Format: '[A4 B2 C2]'": "Format: '[A7 B7 C6]'",
+                "Format: '[4,2,2]'": "Format: '[7,7,6]'",
+                "Format: '[4, 2, 2]'": "Format: '[7, 7, 6]'",
+                "Format: '[4 2 2]'": "Format: '[7 7 6]'",
+            }
+            normalized = observation
+            for old, new in replacements.items():
+                if old in normalized:
+                    normalized = normalized.replace(old, new)
+            return normalized
         return observation
 
     def __call__(self, observation: str) -> str:
