@@ -70,6 +70,7 @@ class OpenAIAgent(Agent):
     """Thin wrapper around the OpenAI Chat Completions API with automatic prompt routing."""
 
     DEFAULT_TIMEOUT = 60.0
+    DEFAULT_MAX_TOKENS = 16000
 
     def __init__(
         self,
@@ -109,6 +110,7 @@ class OpenAIAgent(Agent):
         self._completion_kwargs: Dict[str, Any] = self._inject_thinking_flag(
             dict(completion_kwargs), enable_thinking
         )
+        self._completion_kwargs.setdefault("max_tokens", self.DEFAULT_MAX_TOKENS)
 
         self.prompt_variant = prompt_variant
         self._prompt_loader: Optional[
