@@ -1,6 +1,22 @@
 from typing import Dict, Optional
 
+import pytest
+
 from src.agents.agent import OpenAIAgent
+from src.utils.action_normalizer import ActionNormalizer
+
+
+def test_inject_thinking_flag():
+    base_kwargs: Dict[str, Dict[str, Dict[str, bool]]] = {}
+    updated = OpenAIAgent._inject_thinking_flag(base_kwargs, True)
+    assert updated["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+
+    base_kwargs = {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    updated = OpenAIAgent._inject_thinking_flag(base_kwargs, True)
+    assert updated["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+    untouched = OpenAIAgent._inject_thinking_flag({}, False)
+    assert "extra_body" not in untouched
 
 
 def test_resolve_system_prompt_with_routing():
@@ -18,22 +34,6 @@ def test_resolve_system_prompt_with_routing():
 
     agent._static_system_prompt = "custom"
     assert agent._resolve_system_prompt("ignored observation") == "custom"
-
-
-def test_inject_thinking_flag():
-    base_kwargs: Dict[str, Dict[str, Dict[str, bool]]] = {}
-    updated = OpenAIAgent._inject_thinking_flag(base_kwargs, True)
-    assert updated["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
-
-    # Ensure existing flags are preserved
-    base_kwargs = {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
-    updated = OpenAIAgent._inject_thinking_flag(base_kwargs, True)
-    assert updated["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
-
-    # Disabling thinking leaves kwargs untouched
-    untouched = OpenAIAgent._inject_thinking_flag({}, False)
-    assert "extra_body" not in untouched
-
 
 def test_call_returns_error_on_exception():
     agent = OpenAIAgent.__new__(OpenAIAgent)
@@ -57,7 +57,8 @@ def test_call_returns_error_on_exception():
 
     agent._client = _Client()
 
-    assert agent("observation") == "[ERROR]"
+    with pytest.raises(RuntimeError):
+        agent("observation")
 
 
 def test_call_returns_error_on_empty_content():
@@ -154,8 +155,7 @@ def test_resolve_system_prompt_colonel_override():
     agent._client = _Client()  # not used for prompt resolution
 
     prompt = agent._resolve_system_prompt("[GAME] Colonel Blotto ...")
-    assert "Format: '[A7 B7 C6]'" in prompt
-    assert "A4 B2 C2" not in prompt
+    assert "Format: '[A4 B2 C2]'" in prompt
 
 
 def test_normalize_observation_colonel_override():
@@ -165,16 +165,14 @@ def test_normalize_observation_colonel_override():
         "Format: '[A4 B2 C2]'"
     )
     normalized = agent._normalize_observation(colonel_obs)
-    assert "Format: '[A7 B7 C6]'" in normalized
-    assert "A4 B2 C2" not in normalized
+    assert normalized == colonel_obs
 
 
 def test_colonel_numeric_format_replacement():
     agent = OpenAIAgent.__new__(OpenAIAgent)
     numeric_obs = "Format: '[4,2,2]' some other instructions"
     normalized = agent._normalize_observation(numeric_obs)
-    assert "[7,7,6]" in normalized
-    assert "[4,2,2]" not in normalized
+    assert normalized == numeric_obs
 
     def _loader(game: str, variant: Optional[str]) -> Optional[str]:
         return "Format: '[4, 2, 2]' rules"
@@ -183,5 +181,126 @@ def test_colonel_numeric_format_replacement():
     agent._static_system_prompt = None
     agent._fallback_system_prompt = "fallback"
     prompt = agent._resolve_system_prompt("[GAME] Colonel Blotto ...")
-    assert "[7, 7, 6]" in prompt
-    assert "[4, 2, 2]" not in prompt
+    assert "[4, 2, 2]" in prompt
+
+
+def test_call_handles_structured_content_list():
+    agent = OpenAIAgent.__new__(OpenAIAgent)
+    agent.model_name = "dummy"
+    agent._static_system_prompt = None
+    agent._fallback_system_prompt = "fallback"
+    agent._prompt_loader = None
+    agent._completion_kwargs = {}
+
+    class _Message:
+        def __init__(self):
+            self.content = [{"type": "text", "text": "<think>plan</think>[pass]"}]
+
+    class _Choice:
+        def __init__(self):
+            self.message = _Message()
+
+    class _Response:
+        def __init__(self):
+            self.choices = [_Choice()]
+
+    class _Completions:
+        def create(self, *args, **kwargs):
+            return _Response()
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    agent._client = _Client()
+
+    assert agent("observation") == "[pass]"
+
+
+def test_call_handles_reasoning_output_text():
+    agent = OpenAIAgent.__new__(OpenAIAgent)
+    agent.model_name = "dummy"
+    agent._static_system_prompt = None
+    agent._fallback_system_prompt = "fallback"
+    agent._prompt_loader = None
+    agent._completion_kwargs = {}
+
+    class _Message:
+        def __init__(self):
+            self.content = None
+            self.reasoning = {"output_text": "[pass]"}
+
+    class _Choice:
+        def __init__(self):
+            self.message = _Message()
+
+    class _Response:
+        def __init__(self):
+            self.choices = [_Choice()]
+
+    class _Completions:
+        def create(self, *args, **kwargs):
+            return _Response()
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    agent._client = _Client()
+
+    assert agent("observation") == "[pass]"
+
+
+def test_colonel_normalizer_filters_extra_fields():
+    normalizer = ActionNormalizer.instance()
+    observation = "[GAME] Colonel Blotto\nFormat: '[A4 B2 C2]'"
+    result = normalizer.normalize_from_observation(
+        "colonel_blotto", observation, "[D1 E0 T20 A8 B7 C5]"
+    )
+    assert result == "[A8 B7 C5]"
+
+
+def test_call_handles_choice_reasoning_content():
+    agent = OpenAIAgent.__new__(OpenAIAgent)
+    agent.model_name = "dummy"
+    agent._static_system_prompt = None
+    agent._fallback_system_prompt = "fallback"
+    agent._prompt_loader = None
+    agent._completion_kwargs = {}
+
+    class _Message:
+        def __init__(self):
+            self.content = None
+
+    class _Choice:
+        def __init__(self):
+            self.message = _Message()
+            self.reasoning_content = "\n[pass]"
+
+    class _Response:
+        def __init__(self):
+            self.choices = [_Choice()]
+
+    class _Completions:
+        def create(self, *args, **kwargs):
+            return _Response()
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    agent._client = _Client()
+
+    assert agent("observation") == "[pass]"

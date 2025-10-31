@@ -203,18 +203,33 @@ class ActionNormalizer:
         # If context provides fields, include zeros for omitted fields in stable order
         fields_ctx: List[str] = [f.upper() for f in (ctx.get("fields") or [])]
         if fields_ctx:
-            matched_fields = {field for field, _ in parsed_pairs}
-            if matched_fields == set(fields_ctx):
-                if isinstance(total_units, int):
-                    sum_units = sum(units for _, units in parsed_pairs)
-                    if sum_units != total_units:
-                        return text
-                ordered = []
-                for field in fields_ctx:
-                    value = next((units for f, units in parsed_pairs if f == field), 0)
-                    ordered.append(f"{field}{value}")
+            filtered_pairs: Dict[str, int] = {}
+            for field, units in parsed_pairs:
+                if field in fields_ctx and field not in filtered_pairs:
+                    filtered_pairs[field] = units
+            if filtered_pairs:
+                if set(filtered_pairs) == set(fields_ctx):
+                    if isinstance(total_units, int):
+                        sum_units = sum(filtered_pairs[field] for field in fields_ctx)
+                        if sum_units != total_units:
+                            return text
+                ordered = [f"{field}{filtered_pairs.get(field, 0)}" for field in fields_ctx]
                 return f"[{' '.join(ordered)}]"
-        # Otherwise keep just the parsed pairs order
+        else:
+            allowed = ["A", "B", "C"]
+            filtered_pairs: Dict[str, int] = {}
+            for field, units in parsed_pairs:
+                if field in allowed and field not in filtered_pairs:
+                    filtered_pairs[field] = units
+            if filtered_pairs:
+                ordered = [f"{field}{filtered_pairs[field]}" for field in allowed if field in filtered_pairs]
+                if ordered:
+                    return f"[{' '.join(ordered)}]"
+            digits_only = [int(d) for d in re.findall(r"\d+", s)]
+            if len(digits_only) >= 3:
+                fallback_pairs = [f"{label}{digits_only[i]}" for i, label in enumerate(allowed)]
+                return f"[{' '.join(fallback_pairs)}]"
+
         parts = [f"{field}{units}" for field, units in parsed_pairs]
         return f"[{' '.join(parts)}]"
 
@@ -443,16 +458,17 @@ class ActionNormalizer:
         if match:
             ctx["num_total_units"] = int(match.group(1))
         fields = re.findall(r"fields?\s*:\s*([A-Za-z,\s]+)", obs, re.I)
+        candidates: List[str] = []
         if fields:
-            field_list = re.split(r"[\s,]+", fields[-1].strip())
-            field_list = [f for f in field_list if f]
-            ctx["fields"] = field_list
+            candidates = re.split(r"[\s,]+", fields[-1].strip())
         else:
             match_fields = re.findall(r"Available fields:\s*([A-Za-z,\s]+)", obs, re.I)
             if match_fields:
-                field_list = re.split(r"[\s,]+", match_fields[-1].strip())
-                field_list = [f for f in field_list if f]
-                ctx["fields"] = field_list
+                candidates = re.split(r"[\s,]+", match_fields[-1].strip())
+
+        filtered_fields = [f.upper() for f in candidates if f and re.fullmatch(r"[A-Za-z]", f)]
+        if filtered_fields:
+            ctx["fields"] = filtered_fields
         return ctx
 
     def _infer_ctx_secret_mafia(self, obs: str) -> Dict:

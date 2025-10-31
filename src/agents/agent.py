@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 import re
@@ -7,19 +8,19 @@ from typing import Any, Callable, Dict, Optional
 
 try:
     from src.utils.prompts import get_game_prompt  # type: ignore
-except Exception:  # pragma: no cover - optional import during setup
+except ImportError as primary_import_error:  # pragma: no cover - package fallback
     try:
         from ..utils.prompts import get_game_prompt  # type: ignore
-    except Exception:
-        get_game_prompt = None  # type: ignore
+    except ImportError as fallback_import_error:
+        raise ImportError("Failed to import get_game_prompt") from fallback_import_error
 
 try:
     from src.utils.action_normalizer import ActionNormalizer  # type: ignore
-except Exception:  # pragma: no cover - optional import during setup
+except ImportError as primary_import_error:  # pragma: no cover - package fallback
     try:
         from ..utils.action_normalizer import ActionNormalizer  # type: ignore
-    except Exception:
-        ActionNormalizer = None  # type: ignore
+    except ImportError as fallback_import_error:
+        raise ImportError("Failed to import ActionNormalizer") from fallback_import_error
 
 
 STANDARD_GAME_PROMPT = """You are a competitive game player. Follow these strict instructions:
@@ -78,10 +79,12 @@ class Agent(ABC):
 
 
 class OpenAIAgent(Agent):
-    """Thin wrapper around the OpenAI Chat Completions API with automatic prompt routing."""
+    """Thin wrapper around the OpenAI-compatible vLLM deployment with automatic prompt routing."""
 
     DEFAULT_TIMEOUT = 300.0
     DEFAULT_MAX_TOKENS = 10000
+    DEFAULT_MODEL_NAME = "yinita/mg-8b-cot-sft-general-1024"
+    DEFAULT_BASE_URL = "http://localhost:8000/v1"
     DEFAULT_CONTEXT_WINDOW = 16000
     GENERATION_MARGIN = 100
 
@@ -117,7 +120,7 @@ class OpenAIAgent(Agent):
         except ImportError as exc:  # pragma: no cover - import guard
             raise ImportError("OpenAI package is required. Install it with: pip install openai") from exc
 
-        self.model_name = model_name or os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.model_name = model_name or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL_NAME)
         self._static_system_prompt = system_prompt
         self._fallback_system_prompt = STANDARD_GAME_PROMPT
         completion_params = dict(completion_kwargs)
@@ -153,7 +156,7 @@ class OpenAIAgent(Agent):
         if not resolved_key:
             resolved_key = "sk-placeholder"
 
-        resolved_base = base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        resolved_base = base_url or os.getenv("OPENAI_BASE_URL") or self.DEFAULT_BASE_URL
         timeout = request_timeout if request_timeout is not None else self.DEFAULT_TIMEOUT
 
         self._client = OpenAI(api_key=resolved_key, base_url=resolved_base, timeout=timeout)
@@ -178,38 +181,14 @@ class OpenAIAgent(Agent):
         if self._prompt_loader and observation:
             game = _detect_game_from_observation(observation)
             if game:
-                prompt = self._prompt_loader(game, self.prompt_variant)
+                prompt_variant = getattr(self, "prompt_variant", None)
+                prompt = self._prompt_loader(game, prompt_variant)
                 if prompt:
-                    if game == "colonel_blotto":
-                        replacements = {
-                            "Format: '[A4 B2 C2]'": "Format: '[A7 B7 C6]'",
-                            "Format: '[4,2,2]'": "Format: '[7,7,6]'",
-                            "Format: '[4, 2, 2]'": "Format: '[7, 7, 6]'",
-                            "Format: '[4 2 2]'": "Format: '[7 7 6]'",
-                        }
-                        for old, new in replacements.items():
-                            if old in prompt:
-                                prompt = prompt.replace(old, new)
                     return prompt
 
         return self._fallback_system_prompt
 
     def _normalize_observation(self, observation: str) -> str:
-        if not observation:
-            return observation
-        game = _detect_game_from_observation(observation)
-        if game == "colonel_blotto":
-            replacements = {
-                "Format: '[A4 B2 C2]'": "Format: '[A7 B7 C6]'",
-                "Format: '[4,2,2]'": "Format: '[7,7,6]'",
-                "Format: '[4, 2, 2]'": "Format: '[7, 7, 6]'",
-                "Format: '[4 2 2]'": "Format: '[7 7 6]'",
-            }
-            normalized = observation
-            for old, new in replacements.items():
-                if old in normalized:
-                    normalized = normalized.replace(old, new)
-            return normalized
         return observation
 
     def __call__(self, observation: str) -> str:
@@ -229,12 +208,12 @@ class OpenAIAgent(Agent):
                 messages=messages,
                 **request_kwargs,
             )
-        except Exception:
-            return "[ERROR]"
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Chat completion request failed")
+            raise
 
         choice = response.choices[0]
-        message = choice.message
-        content = getattr(message, "content", None)
+        content = self._extract_choice_content(choice)
         if isinstance(content, str):
             cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
             if cleaned:
@@ -244,72 +223,6 @@ class OpenAIAgent(Agent):
                 action = self._extract_bracket_action(cleaned)
                 return action or cleaned
         return "[ERROR]"
-
-    def _normalize_action(self, observation: str, raw_action: str) -> Optional[str]:
-        if not raw_action:
-            return None
-        if ActionNormalizer is None:
-            return None
-        game = _detect_game_from_observation(observation)
-        if not game:
-            return None
-        try:
-            normalized = ActionNormalizer.instance().normalize_from_observation(
-                game, observation, raw_action
-            )
-        except Exception:
-            return None
-        if isinstance(normalized, str) and normalized.strip():
-            return normalized.strip()
-        return None
-
-    @staticmethod
-    def _extract_bracket_action(text: str) -> Optional[str]:
-        """Best-effort extraction of a bracketed Colon Blotto action."""
-        matches = re.findall(r"\[([^\]]+)\]", text)
-        if not matches:
-            return None
-
-        for payload in reversed(matches):
-            payload = payload.strip()
-            if not any(ch.isdigit() for ch in payload):
-                continue
-
-            if re.fullmatch(r"\d{3}", payload):
-                a, b, c = payload
-                return f"[A{a} B{b} C{c}]"
-
-            cleaned = payload.replace(",", " ")
-            cleaned = re.sub(r"([A-Za-z])[ ]*:", r"\1", cleaned)
-            cleaned = re.sub(r"\s+", " ", cleaned).strip().upper()
-            tokens = cleaned.split()
-
-            mapped: list[str] = []
-            simple_digits: list[str] = []
-            for tok in tokens:
-                tok = tok.strip()
-                if not tok:
-                    continue
-                if tok[0].isalpha():
-                    label = tok[0]
-                    value = re.sub(r"\D", "", tok[1:])
-                    if value:
-                        mapped.append(f"{label}{value}")
-                elif tok.isdigit():
-                    simple_digits.append(tok)
-
-            if mapped and mapped == tokens[:len(mapped)]:
-                return "[" + " ".join(mapped) + "]"
-
-            if len(simple_digits) == 3:
-                labels = ["A", "B", "C"]
-                combined = [f"{labels[i]}{val}" for i, val in enumerate(simple_digits)]
-                return "[" + " ".join(combined) + "]"
-
-            if mapped:
-                return "[" + " ".join(mapped) + "]"
-
-        return None
 
     def _adjust_max_tokens(
         self,
@@ -389,11 +302,6 @@ class OpenAIAgent(Agent):
         self._tokenizer_initialized = True
         try:
             from transformers import AutoTokenizer  # type: ignore
-        except ImportError:
-            self._tokenizer = None
-            return None
-
-        try:
             self._tokenizer = AutoTokenizer.from_pretrained(
                 self._tokenizer_name, trust_remote_code=True
             )
@@ -401,6 +309,191 @@ class OpenAIAgent(Agent):
             self._tokenizer = None
         return self._tokenizer
 
+    def _extract_choice_content(self, choice: Any) -> Optional[str]:
+        message = getattr(choice, "message", None)
+        if message is None and isinstance(choice, dict):
+            message = choice.get("message")
+        message_content = None
+        if message is not None:
+            message_content = self._extract_message_content(message)
+            if message_content:
+                return message_content
+        reasoning_content = self._coerce_reasoning_to_text(
+            self._maybe_get(choice, "reasoning_content")
+        )
+        if reasoning_content:
+            return reasoning_content
+        return None
+
+    @staticmethod
+    def _extract_message_content(message: Any) -> Optional[str]:
+        content = OpenAIAgent._coerce_content_to_text(
+            OpenAIAgent._maybe_get(message, "content")
+        )
+        if content:
+            return content
+
+        for key in ("output_text", "final_answer", "final", "answer"):
+            value = OpenAIAgent._maybe_get(message, key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        reasoning = OpenAIAgent._maybe_get(message, "reasoning")
+        reasoning_text = OpenAIAgent._coerce_reasoning_to_text(reasoning)
+        if reasoning_text:
+            return reasoning_text
+
+        return None
+
+    @staticmethod
+    def _maybe_get(container: Any, key: str) -> Any:
+        if container is None:
+            return None
+        if isinstance(container, dict):
+            return container.get(key)
+        if hasattr(container, key):
+            return getattr(container, key)
+        getter = getattr(container, "get", None)
+        if callable(getter):
+            try:
+                return getter(key)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_content_to_text(content: Any) -> Optional[str]:
+        if content is None:
+            return None
+        if isinstance(content, str):
+            stripped = content.strip()
+            return stripped if stripped else None
+        if isinstance(content, (list, tuple)):
+            parts: list[str] = []
+            for item in content:
+                text = None
+                if isinstance(item, str):
+                    text = item
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or item.get("value")
+                    if text is None and "children" in item:
+                        text = OpenAIAgent._coerce_content_to_text(item.get("children"))
+                    if text is None and "output_text" in item:
+                        text = item.get("output_text")
+                elif hasattr(item, "text"):
+                    text = getattr(item, "text")
+                if text is None:
+                    # attempt nested extraction for complex objects
+                    text = OpenAIAgent._coerce_content_to_text(OpenAIAgent._maybe_get(item, "text"))
+                if isinstance(text, (list, tuple)):
+                    text = OpenAIAgent._coerce_content_to_text(text)
+                if isinstance(text, str):
+                    stripped = text.strip()
+                    if stripped:
+                        parts.append(stripped)
+            if parts:
+                return "\n".join(parts)
+            return None
+        if isinstance(content, dict):
+            return OpenAIAgent._coerce_content_to_text(list(content.values()))
+        return None
+
+    @staticmethod
+    def _coerce_reasoning_to_text(reasoning: Any) -> Optional[str]:
+        if reasoning is None:
+            return None
+        if isinstance(reasoning, str):
+            stripped = reasoning.strip()
+            return stripped if stripped else None
+        if isinstance(reasoning, dict):
+            for key in ("output_text", "answer", "final_answer", "final", "text", "content"):
+                value = reasoning.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            combined: list[str] = []
+            for key in ("reasoning_content", "steps", "thoughts", "messages"):
+                value = reasoning.get(key)
+                text = OpenAIAgent._coerce_content_to_text(value)
+                if text:
+                    combined.append(text)
+            if combined:
+                return "\n".join(part for part in combined if part)
+            return None
+        if isinstance(reasoning, (list, tuple)):
+            collected: list[str] = []
+            for item in reasoning:
+                text = OpenAIAgent._coerce_reasoning_to_text(item)
+                if text:
+                    collected.append(text)
+            if collected:
+                return "\n".join(collected)
+        return None
+
+    def _normalize_action(self, observation: str, raw_action: str) -> Optional[str]:
+        if not raw_action:
+            return None
+        if ActionNormalizer is None:
+            return None
+        game = _detect_game_from_observation(observation)
+        if not game:
+            return None
+        try:
+            normalized = ActionNormalizer.instance().normalize_from_observation(
+                game, observation, raw_action
+            )
+        except Exception:
+            return None
+        if isinstance(normalized, str) and normalized.strip():
+            return normalized.strip()
+        return None
+
+    @staticmethod
+    def _extract_bracket_action(text: str) -> Optional[str]:
+        """Best-effort extraction of a bracketed Colon Blotto action."""
+        matches = re.findall(r"\[([^\]]+)\]", text)
+        if not matches:
+            return None
+
+        for payload in reversed(matches):
+            payload = payload.strip()
+            if not any(ch.isdigit() for ch in payload):
+                continue
+
+            if re.fullmatch(r"\d{3}", payload):
+                a, b, c = payload
+                return f"[A{a} B{b} C{c}]"
+
+            cleaned = payload.replace(",", " ")
+            cleaned = re.sub(r"([A-Za-z])[ ]*:", r"\1", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip().upper()
+            tokens = cleaned.split()
+
+            mapped: list[str] = []
+            simple_digits: list[str] = []
+            for tok in tokens:
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if tok[0].isalpha():
+                    label = tok[0]
+                    value = re.sub(r"\D", "", tok[1:])
+                    if value:
+                        mapped.append(f"{label}{value}")
+                elif tok.isdigit():
+                    simple_digits.append(tok)
+
+            if mapped and mapped == tokens[:len(mapped)]:
+                return "[" + " ".join(mapped) + "]"
+
+            if len(simple_digits) == 3:
+                labels = ["A", "B", "C"]
+                combined = [f"{labels[i]}{val}" for i, val in enumerate(simple_digits)]
+                return "[" + " ".join(combined) + "]"
+
+            if mapped:
+                return "[" + " ".join(mapped) + "]"
+
+        return None
 
 __all__ = [
     "Agent",
