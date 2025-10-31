@@ -69,7 +69,7 @@ class Agent(ABC):
 class OpenAIAgent(Agent):
     """Thin wrapper around the OpenAI Chat Completions API with automatic prompt routing."""
 
-    DEFAULT_TIMEOUT = 120.0
+    DEFAULT_TIMEOUT = 300.0
     DEFAULT_MAX_TOKENS = 10000
     DEFAULT_CONTEXT_WINDOW = 16000
     GENERATION_MARGIN = 100
