@@ -35,8 +35,9 @@ All dependencies are pinned in `requirements.txt` with specific versions.
    vllm serve yinita/mg-8b-cot-sft-general-1024 \
        --port 8000 \
        --trust-remote-code \
-       --enable-reasoning \
        --reasoning-parser deepseek_r1 \
+       --max-model-len 16000 \
+       --gpu-memory-utilization 0.9 \
        > vllm_general_reasoning.log 2>&1 &
    ```
 
