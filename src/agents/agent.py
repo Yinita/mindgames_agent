@@ -189,6 +189,7 @@ class OpenAIAgent(Agent):
             {"role": "system", "content": self._resolve_system_prompt(normalized_observation)},
             {"role": "user", "content": normalized_observation},
         ]
+        self._ensure_tokenizer_state()
         request_kwargs = dict(self._completion_kwargs)
         configured_max = request_kwargs.get("max_tokens")
         request_kwargs["max_tokens"] = self._adjust_max_tokens(messages, configured_max)
@@ -269,6 +270,18 @@ class OpenAIAgent(Agent):
             return len(input_ids)  # type: ignore[arg-type]
         except TypeError:
             return None
+
+    def _ensure_tokenizer_state(self) -> None:
+        if not hasattr(self, "_context_window") or self._context_window is None:
+            self._context_window = self.DEFAULT_CONTEXT_WINDOW
+        if not hasattr(self, "_generation_margin") or self._generation_margin is None:
+            self._generation_margin = self.GENERATION_MARGIN
+        if not hasattr(self, "_tokenizer_name") or not self._tokenizer_name:
+            self._tokenizer_name = self.model_name
+        if not hasattr(self, "_tokenizer_initialized"):
+            self._tokenizer_initialized = False
+        if not hasattr(self, "_tokenizer"):
+            self._tokenizer = None
 
     def _get_tokenizer(self):
         if self._tokenizer_initialized:
