@@ -1,6 +1,9 @@
 from typing import Any, Optional
 
-from src.agents.agent import Agent, OpenAIAgent, STANDARD_GAME_PROMPT
+try:  # Prefer local package import when running as part of the project
+    from .agents.agent import Agent, OpenAIAgent, STANDARD_GAME_PROMPT
+except ImportError:  # Fallback when executed as a top-level module
+    from agents.agent import Agent, OpenAIAgent, STANDARD_GAME_PROMPT  # type: ignore
 
 
 def agent(

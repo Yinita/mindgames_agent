@@ -6,9 +6,20 @@ import re
 from typing import Any, Callable, Dict, Optional
 
 try:
-    from src.utils.prompts import get_game_prompt
+    from src.utils.prompts import get_game_prompt  # type: ignore
 except Exception:  # pragma: no cover - optional import during setup
-    get_game_prompt = None  # type: ignore
+    try:
+        from ..utils.prompts import get_game_prompt  # type: ignore
+    except Exception:
+        get_game_prompt = None  # type: ignore
+
+try:
+    from src.utils.action_normalizer import ActionNormalizer  # type: ignore
+except Exception:  # pragma: no cover - optional import during setup
+    try:
+        from ..utils.action_normalizer import ActionNormalizer  # type: ignore
+    except Exception:
+        ActionNormalizer = None  # type: ignore
 
 
 STANDARD_GAME_PROMPT = """You are a competitive game player. Follow these strict instructions:
@@ -227,8 +238,78 @@ class OpenAIAgent(Agent):
         if isinstance(content, str):
             cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
             if cleaned:
-                return cleaned
+                normalized = self._normalize_action(normalized_observation, cleaned)
+                if normalized:
+                    return normalized
+                action = self._extract_bracket_action(cleaned)
+                return action or cleaned
         return "[ERROR]"
+
+    def _normalize_action(self, observation: str, raw_action: str) -> Optional[str]:
+        if not raw_action:
+            return None
+        if ActionNormalizer is None:
+            return None
+        game = _detect_game_from_observation(observation)
+        if not game:
+            return None
+        try:
+            normalized = ActionNormalizer.instance().normalize_from_observation(
+                game, observation, raw_action
+            )
+        except Exception:
+            return None
+        if isinstance(normalized, str) and normalized.strip():
+            return normalized.strip()
+        return None
+
+    @staticmethod
+    def _extract_bracket_action(text: str) -> Optional[str]:
+        """Best-effort extraction of a bracketed Colon Blotto action."""
+        matches = re.findall(r"\[([^\]]+)\]", text)
+        if not matches:
+            return None
+
+        for payload in reversed(matches):
+            payload = payload.strip()
+            if not any(ch.isdigit() for ch in payload):
+                continue
+
+            if re.fullmatch(r"\d{3}", payload):
+                a, b, c = payload
+                return f"[A{a} B{b} C{c}]"
+
+            cleaned = payload.replace(",", " ")
+            cleaned = re.sub(r"([A-Za-z])[ ]*:", r"\1", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip().upper()
+            tokens = cleaned.split()
+
+            mapped: list[str] = []
+            simple_digits: list[str] = []
+            for tok in tokens:
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if tok[0].isalpha():
+                    label = tok[0]
+                    value = re.sub(r"\D", "", tok[1:])
+                    if value:
+                        mapped.append(f"{label}{value}")
+                elif tok.isdigit():
+                    simple_digits.append(tok)
+
+            if mapped and mapped == tokens[:len(mapped)]:
+                return "[" + " ".join(mapped) + "]"
+
+            if len(simple_digits) == 3:
+                labels = ["A", "B", "C"]
+                combined = [f"{labels[i]}{val}" for i, val in enumerate(simple_digits)]
+                return "[" + " ".join(combined) + "]"
+
+            if mapped:
+                return "[" + " ".join(mapped) + "]"
+
+        return None
 
     def _adjust_max_tokens(
         self,
