@@ -2,7 +2,10 @@ import types
 
 import pytest
 
-import src.agent as agent_module
+try:
+    import external.mindgames_agent.src.agent as agent_module
+except ImportError:  # pragma: no cover - run within package without external prefix
+    import agent as agent_module  # type: ignore
 
 
 def test_agent_factory_returns_openai(monkeypatch):

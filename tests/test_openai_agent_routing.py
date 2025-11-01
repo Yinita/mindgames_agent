@@ -2,8 +2,15 @@ from typing import Dict, Optional
 
 import pytest
 
-from src.agents.agent import OpenAIAgent
-from src.utils.action_normalizer import ActionNormalizer
+try:
+    from external.mindgames_agent.src.agents.agent import OpenAIAgent
+except ImportError:  # pragma: no cover - run within package without external prefix
+    from agents.agent import OpenAIAgent  # type: ignore
+
+try:
+    from external.mindgames_agent.src.utils.action_normalizer import ActionNormalizer
+except ImportError:  # pragma: no cover - run within package without external prefix
+    from utils.action_normalizer import ActionNormalizer  # type: ignore
 
 
 def test_inject_thinking_flag():

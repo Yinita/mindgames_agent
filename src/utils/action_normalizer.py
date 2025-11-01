@@ -154,7 +154,7 @@ class ActionNormalizer:
             if m2:
                 word, num = m2.group(1), m2.group(2)
                 return f"[{word.lower()} {int(num)}]"
-            # last resort: keep original wrapped to trigger env validation
+            # last resort: keep original wrapped to trigger invalid handling
             token = re.sub(r"\s+", " ", s)
             return f"[{token}]" if not s.startswith("[") else s
 
@@ -172,66 +172,48 @@ class ActionNormalizer:
     # ---- Colonel Blotto ----
     def _colonel_blotto(self, text: str, ctx: Dict) -> str:
         s = (text or "").strip()
-        compact_digits = re.sub(r"[^\d]", "", s)
-        digit_groups = re.findall(r"\d+", s)
-        if len(compact_digits) == 3 and digit_groups and len(digit_groups) == 1 and len(digit_groups[0]) == 3:
-            fields_ctx: List[str] = [f.upper() for f in (ctx.get("fields") or [])]
-            labels = fields_ctx[:3] if len(fields_ctx) >= 3 else ["A", "B", "C"]
-            digits = [int(ch) for ch in compact_digits]
-            paired = [f"{labels[i]}{digits[i]}" for i in range(min(3, len(labels), len(digits)))]
-            if paired:
-                return f"[{' '.join(paired)}]"
-        token_re = re.compile(r"([A-Za-z])\s*[:=]?\s*(\d+)")
-        parsed_pairs = [(m.group(1).upper(), int(m.group(2))) for m in token_re.finditer(s)]
-
-        if not parsed_pairs:
-            fields: List[str] = [f for f in (ctx.get("fields") or [])]
-            nums = list(map(int, re.findall(r"\d+", s))) if s else []
-            if fields and nums:
-                parsed_pairs = [(f.upper(), n) for f, n in zip(fields, nums)]
-
-        if not parsed_pairs:
-            # As a last resort, return empty allocation brackets to trigger invalid handling upstream
+        fields_ctx: List[str] = [f.upper() for f in (ctx.get("fields") or [])]
+        if not s:
             return text
 
-        total_units = ctx.get("num_total_units")
-        if isinstance(total_units, int):
-            sum_units = sum(units for _, units in parsed_pairs)
-            if sum_units > total_units:
-                return text
-
-        # If context provides fields, include zeros for omitted fields in stable order
-        fields_ctx: List[str] = [f.upper() for f in (ctx.get("fields") or [])]
-        if fields_ctx:
-            filtered_pairs: Dict[str, int] = {}
-            for field, units in parsed_pairs:
-                if field in fields_ctx and field not in filtered_pairs:
-                    filtered_pairs[field] = units
-            if filtered_pairs:
-                if set(filtered_pairs) == set(fields_ctx):
-                    if isinstance(total_units, int):
-                        sum_units = sum(filtered_pairs[field] for field in fields_ctx)
-                        if sum_units != total_units:
-                            return text
-                ordered = [f"{field}{filtered_pairs.get(field, 0)}" for field in fields_ctx]
-                return f"[{' '.join(ordered)}]"
-        else:
-            allowed = ["A", "B", "C"]
-            filtered_pairs: Dict[str, int] = {}
-            for field, units in parsed_pairs:
-                if field in allowed and field not in filtered_pairs:
-                    filtered_pairs[field] = units
-            if filtered_pairs:
-                ordered = [f"{field}{filtered_pairs[field]}" for field in allowed if field in filtered_pairs]
+        def format_pairs(pairs: List[tuple[str, int]]) -> Optional[str]:
+            if not pairs:
+                return None
+            ordered: List[str] = []
+            if fields_ctx:
+                seen: Dict[str, int] = {}
+                for field, units in pairs:
+                    if field in fields_ctx and field not in seen:
+                        seen[field] = units
+                ordered = [f"{field}{seen[field]}" for field in fields_ctx if field in seen]
                 if ordered:
-                    return f"[{' '.join(ordered)}]"
-            digits_only = [int(d) for d in re.findall(r"\d+", s)]
-            if len(digits_only) >= 3:
-                fallback_pairs = [f"{label}{digits_only[i]}" for i, label in enumerate(allowed)]
-                return f"[{' '.join(fallback_pairs)}]"
+                    return "[" + " ".join(ordered) + "]"
+            ordered = [f"{field}{units}" for field, units in pairs]
+            if ordered:
+                return "[" + " ".join(ordered) + "]"
+            return None
 
-        parts = [f"{field}{units}" for field, units in parsed_pairs]
-        return f"[{' '.join(parts)}]"
+        # Prioritize the last bracketed allocation containing numeric tokens.
+        bracket_segments = re.findall(r"\[([^\]]+)\]", s)
+        for payload in reversed(bracket_segments):
+            pairs = [
+                (m.group(1).upper(), int(m.group(2)))
+                for m in re.finditer(r"([A-Za-z])\s*[:=]?\s*(\d+)", payload)
+            ]
+            formatted = format_pairs(pairs)
+            if formatted:
+                return formatted
+
+        # Fallback to scanning the entire text.
+        pairs = [
+            (m.group(1).upper(), int(m.group(2)))
+            for m in re.finditer(r"([A-Za-z])\s*[:=]?\s*(\d+)", s)
+        ]
+        formatted = format_pairs(pairs)
+        if formatted:
+            return formatted
+
+        return text
 
     # ---- Secret Mafia ----
     def _secret_mafia(self, text: str, ctx: Dict) -> str:
@@ -390,15 +372,47 @@ class ActionNormalizer:
 
     # ---- Truth and Deception ----
     def _truth_and_deception(self, text: str, ctx: Dict) -> str:
-        instruction = ctx.get("instruction") or ""
-        instruction = re.sub(r"\s+", " ", instruction).strip()
-        s = re.sub(r"\s+", " ", (text or "").strip())
-        if not instruction:
-            return s
-        if "truth" in instruction.lower() and "deception" in instruction.lower():
-            # Let original text pass through to preserve nuance when unsure
-            return s
-        return s
+        """
+        Chat turns: return lightweight cleaned chat (no [GAME] lines).
+        Guess turn: normalize to "[Fact 1]" or "[Fact 2]" from flexible inputs.
+        """
+        s = (text or "").strip()
+        # strip wrapping quotes frequently produced by models
+        s = s.strip("\"'")
+        phase = (ctx.get("phase") or "").lower()
+
+        # During chat: ignore instructions and meta, keep concise text
+        if phase in ("chat", "conversation", ""):
+            s_clean = re.sub(r"\[GAME\][^\n]*", "", s, flags=re.I)
+            s_clean = re.sub(r"\s+", " ", s_clean).strip()
+            return s_clean if s_clean else "ok"
+
+        # Guess phase: robustly map variants to [Fact 1] / [Fact 2]
+        # 1) Exact bracketed token
+        m = re.search(r"\[\s*Fact\s*(1|2)\s*\]", s, re.I)
+        if m:
+            return f"[Fact {int(m.group(1))}]"
+        # 2) Simple numeric bracket like [1] / [2]
+        m = re.search(r"\[\s*(1|2)\s*\]", s)
+        if m:
+            return f"[Fact {int(m.group(1))}]"
+        # 3) Inline 'Fact 1' / 'Fact2'
+        m = re.search(r"\bfact\s*(1|2)\b", s, re.I)
+        if m:
+            return f"[Fact {int(m.group(1))}]"
+        # 4) Words like 'first'/'second', 'one'/'two'
+        m = re.search(r"\b(first|second|one|two|1|2)\b", s, re.I)
+        if m:
+            tok = m.group(1).lower()
+            if tok in ("2", "second", "two"):
+                return "[Fact 2]"
+            return "[Fact 1]"
+        # 5) Fallback: any standalone 1 or 2 elsewhere
+        nums = re.findall(r"\b(1|2)\b", s)
+        if nums:
+            return f"[Fact {int(nums[-1])}]"  # take last stated
+        # If nothing matches, return empty to let upstream handle invalid
+        return text
 
     # ---- Observation parsers (context inference) ----
     def _infer_context_from_observation(self, game: str, obs: str) -> Dict:
@@ -431,77 +445,133 @@ class ActionNormalizer:
         if not ctx.get("role") and re.search(r"\[GAME\].*Spymaster submitted clue", obs, re.I):
             ctx["role"] = "operative"
         # Attempt to extract board words if present (optional improvement)
+        # e.g., lines like: "Words: word1, word2, ..." or bracketed on board
         words = re.findall(r"\b([A-Za-z]{2,})\b", obs)
-        blacklist = {
-            "you",
-            "are",
-            "the",
-            "your",
-            "clue",
-            "guess",
-            "words",
-            "board",
-            "team",
-            "spymaster",
-            "operative",
-            "round",
-            "turn",
-        }
-        board_words = [w.lower() for w in words if w.lower() not in blacklist]
+        # filter obvious non-words:
+        common_stop = {"the", "and", "you", "are", "your", "team", "blue", "red", "neutral", "assassin", "round", "game", "chat", "guess", "clue", "submit", "spymaster", "operative"}
+        board_words: List[str] = [w.lower() for w in words if w.isalpha() and w.lower() not in common_stop]
         if board_words:
-            ctx["board_words"] = board_words
+            ctx["board_words"] = board_words[:50]  # cap to avoid bloat
         return ctx
 
     def _infer_ctx_colonel_blotto(self, obs: str) -> Dict:
         ctx: Dict = {}
-        match = re.search(r"Units to allocate:\s*(\d+)", obs, re.I)
-        if match:
-            ctx["num_total_units"] = int(match.group(1))
-        fields = re.findall(r"fields?\s*:\s*([A-Za-z,\s]+)", obs, re.I)
-        candidates: List[str] = []
-        if fields:
-            candidates = re.split(r"[\s,]+", fields[-1].strip())
-        else:
-            match_fields = re.findall(r"Available fields:\s*([A-Za-z,\s]+)", obs, re.I)
-            if match_fields:
-                candidates = re.split(r"[\s,]+", match_fields[-1].strip())
-
-        filtered_fields = [f.upper() for f in candidates if f and re.fullmatch(r"[A-Za-z]", f)]
-        if filtered_fields:
-            ctx["fields"] = filtered_fields
+        # Extract available fields from a line like: "Available fields: A, B, C"
+        m = re.search(r"Available\s+fields:\s*([A-Za-z](?:\s*,\s*[A-Za-z])*)", obs)
+        if m:
+            fields = [t.strip().upper() for t in m.group(1).split(",") if t.strip()]
+            if fields:
+                ctx["fields"] = fields
+        # Units to allocate: 20
+        m2 = re.search(r"Units\s+to\s+allocate:\s*(\d+)", obs, re.I)
+        if m2:
+            ctx["num_total_units"] = int(m2.group(1))
+        # Also infer fields from format hints like [A4 B2 C2]
+        if "fields" not in ctx:
+            fmt_fields = re.findall(r"\b([A-Za-z])\s*\d+\b", obs)
+            if fmt_fields:
+                ctx["fields"] = sorted(list({f.upper() for f in fmt_fields}))
         return ctx
 
     def _infer_ctx_secret_mafia(self, obs: str) -> Dict:
         ctx: Dict = {}
-        alive = list(map(int, re.findall(r"Alive players:\s*([0-9,\s]+)", obs, re.I)))
-        if alive:
-            ctx["alive_players"] = alive
-        instruction = extract_last_game_line(obs)
-        if instruction:
-            ctx["instruction"] = instruction
-        m_self = re.search(r"You are Player\s*(\d+)", obs, re.I)
+        # Players line: "Players: Player 0, Player 1, ..."
+        players_line = re.search(r"Players:\s*([^\n]+)", obs)
+        if players_line:
+            ids = list(map(int, re.findall(r"\b(\d+)\b", players_line.group(1))))
+            if ids:
+                ctx["alive_players"] = ids
+        # Self ID if present
+        m_self = re.search(r"You\s+are\s+Player\s+(\d+)", obs, re.I)
         if m_self:
             ctx["self_id"] = int(m_self.group(1))
+        # Phase inference based on the LAST [GAME] line
+        game_lines = re.findall(r"^\s*\[GAME\]\s*(.*)$", obs, flags=re.I | re.M)
+        last_instr = game_lines[-1] if game_lines else ""
+        phase: Optional[str] = None
+        for gl in reversed(game_lines):
+            if re.search(r"Voting begins|Voting phase|cast your vote", gl, re.I):
+                phase = "vote"
+                break
+            if re.search(r"Night phase\s*-\s*choose one player to investigate|Night phase.*investigate", gl, re.I):
+                phase = "night_investigate"
+                break
+            if re.search(r"Day .*Discussion|Day breaks", gl, re.I):
+                phase = "day_discuss"
+                break
+        if phase:
+            ctx["phase"] = phase
+        if last_instr:
+            ctx["instruction"] = last_instr
+        # If elimination updates are present, try to capture remaining numbers in relevant [GAME] lines
+        if "alive_players" not in ctx:
+            ids = list(map(int, re.findall(r"\[(\d+)\]", obs)))
+            if ids:
+                # heuristic: targets listed are usually alive candidates
+                ctx["alive_players"] = sorted(list({i for i in ids}))
         return ctx
 
     def _infer_ctx_three_player_ipd(self, obs: str) -> Dict:
         ctx: Dict = {}
-        m_phase = re.search(r"Phase:\s*(\w+)", obs, re.I)
-        if m_phase:
-            ctx["phase"] = m_phase.group(1).lower()
-        instruction = extract_last_game_line(obs)
-        if instruction:
-            ctx["instruction"] = instruction
-        opponents = [int(x) for x in re.findall(r"Opponents?:\s*([0-9,\s]+)", obs, re.I)]
-        if opponents:
-            ctx["opponents"] = opponents
+        # Phase: if chat finished prompt exists => decision; else chat
+        if re.search(r"\[GAME\].*Chat finished.*Submit your decisions", obs, re.I):
+            ctx["phase"] = "decision"
+        else:
+            # If explicit submit decisions exists, also decision
+            if re.search(r"\[GAME\].*Submit your decisions", obs, re.I):
+                ctx["phase"] = "decision"
+            else:
+                ctx["phase"] = "chat"
+        # include last [GAME] line for pattern mapping
+        last_instr = extract_last_game_line(obs)
+        if last_instr:
+            ctx["instruction"] = last_instr
+        # Opponents: extract self id and player ids from text
+        self_id = None
+        m_self = re.search(r"You\s+are\s+Player\s+(\d+)", obs, re.I)
+        if m_self:
+            self_id = int(m_self.group(1))
+        mentioned_ids = set()
+        # Explicit "Player <id>" mentions
+        mentioned_ids.update(int(x) for x in re.findall(r"Player\s*(\d+)", obs, flags=re.I))
+        # Bracketed variants like "[Player 2]"
+        mentioned_ids.update(int(x) for x in re.findall(r"\[Player\s*(\d+)\]", obs, flags=re.I))
+        # Decision/chat tokens such as "[2 cooperate]" or "[0 chat]"
+        mentioned_ids.update(
+            int(x)
+            for x in re.findall(r"\[\s*(\d+)\s+(?:cooperate|defect|chat)\b", obs, flags=re.I)
+        )
+        if not mentioned_ids:
+            # Fallback: broader digit scrape while still rejecting non-player numbers
+            mentioned_ids.update(int(x) for x in re.findall(r"\b(\d+)\b", obs))
+
+        ids = sorted(i for i in mentioned_ids if 0 <= i <= 9)
+        if ids:
+            if self_id is not None:
+                ctx["opponents"] = [i for i in ids if i != self_id]
+            else:
+                # Heuristic: in 3p-IPD there are usually 3 players -> take 2 smallest as opponents if unsure
+                ctx["opponents"] = ids[:2]
         return ctx
 
     def _infer_ctx_truth_and_deception(self, obs: str) -> Dict:
+        """Infer whether the current turn is chat or guess using instruction extraction.
+        Falls back to last [GAME] line check if needed.
+        """
         ctx: Dict = {}
-        instruction = extract_truth_and_deception_instruction(obs)
-        if instruction:
-            ctx["instruction"] = instruction
+        instr = extract_truth_and_deception_instruction(obs)
+        if instr:
+            ctx["instruction"] = instr
+            if re.search(r"Now\s+guess\s+which\s+of\s+the\s+two\s+facts\s+are\s+correct", instr, re.I):
+                ctx["phase"] = "guess"
+                return ctx
+        # Fallback: Look at the last [GAME] line
+        game_lines = re.findall(r"^\s*\[GAME\]\s*(.*)$", obs or "", flags=re.I | re.M)
+        last = game_lines[-1] if game_lines else ""
+        if re.search(r"Now\s+guess\s+which\s+of\s+the\s+two\s+facts\s+are\s+correct", last, re.I):
+            ctx["phase"] = "guess"
+        else:
+            ctx["phase"] = "chat"
         return ctx
 
 

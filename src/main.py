@@ -4,7 +4,10 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-from src.agent import agent as agent_factory
+try:
+    from .agent import agent as agent_factory
+except ImportError:  # pragma: no cover - executed as a script within src/
+    from agent import agent as agent_factory  # type: ignore
 
 
 def _read_text(path: Path) -> str:

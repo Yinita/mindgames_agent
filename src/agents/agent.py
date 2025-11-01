@@ -7,18 +7,18 @@ import re
 from typing import Any, Callable, Dict, Optional
 
 try:
-    from src.utils.prompts import get_game_prompt  # type: ignore
-except ImportError as primary_import_error:  # pragma: no cover - package fallback
+    from ..utils.prompts import get_game_prompt  # type: ignore
+except ImportError:  # pragma: no cover - package fallback
     try:
-        from ..utils.prompts import get_game_prompt  # type: ignore
+        from utils.prompts import get_game_prompt  # type: ignore
     except ImportError as fallback_import_error:
         raise ImportError("Failed to import get_game_prompt") from fallback_import_error
 
 try:
-    from src.utils.action_normalizer import ActionNormalizer  # type: ignore
-except ImportError as primary_import_error:  # pragma: no cover - package fallback
+    from ..utils.action_normalizer import ActionNormalizer  # type: ignore
+except ImportError:  # pragma: no cover - package fallback
     try:
-        from ..utils.action_normalizer import ActionNormalizer  # type: ignore
+        from utils.action_normalizer import ActionNormalizer  # type: ignore
     except ImportError as fallback_import_error:
         raise ImportError("Failed to import ActionNormalizer") from fallback_import_error
 
@@ -222,7 +222,10 @@ class OpenAIAgent(Agent):
                     return normalized
                 action = self._extract_bracket_action(cleaned)
                 return action or cleaned
-        return "[ERROR]"
+            stripped = content.strip()
+            if stripped:
+                return stripped
+        return ""
 
     def _adjust_max_tokens(
         self,

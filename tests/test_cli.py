@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import List
 
-import src.main as entry
+try:
+    import external.mindgames_agent.src.main as entry
+except ImportError:  # pragma: no cover - run within package without external prefix
+    import main as entry  # type: ignore
 
 
 class _DummyAgent:

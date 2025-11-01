@@ -1,5 +1,12 @@
-from src.agents.agent import _detect_game_from_observation
-from src.utils.prompts import load_system_prompts, get_game_prompt
+try:
+    from external.mindgames_agent.src.agents.agent import _detect_game_from_observation
+except ImportError:  # pragma: no cover - run within package without external prefix
+    from agents.agent import _detect_game_from_observation  # type: ignore
+
+try:
+    from external.mindgames_agent.src.utils.prompts import load_system_prompts, get_game_prompt
+except ImportError:  # pragma: no cover - run within package without external prefix
+    from utils.prompts import load_system_prompts, get_game_prompt  # type: ignore
 
 
 def test_load_prompts_optional_file():
